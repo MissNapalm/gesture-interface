@@ -2,340 +2,256 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import time
-import pyautogui
 
-pyautogui.FAILSAFE = False
-
-class SimpleGestureDetector:
+class SimpleHandTracker:
     def __init__(self):
+        # Initialize MediaPipe hands
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=2,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.3,
+            min_detection_confidence=0.5,  # Lower threshold for faster detection
+            min_tracking_confidence=0.3,   # Lower threshold for faster tracking
             model_complexity=0
         )
         self.mp_drawing = mp.solutions.drawing_utils
         
-        # Mode toggle
-        self.pinch_mode = False
-        self.last_mode_toggle = 0
+        # Cursor settings
+        self.cursor_x = 640
+        self.cursor_y = 360
+        self.smoothing_factor = 0.7
+        self.last_cursor_x = self.cursor_x
+        self.last_cursor_y = self.cursor_y
         
-        # Cursor for pinch mode
-        self.cursor_x = 320
-        self.cursor_y = 240
+        # Gesture states
         self.is_pinching = False
         
-        # FPS
+        # FPS tracking
         self.fps_counter = 0
-        self.fps_start = time.time()
+        self.fps_start_time = time.time()
         self.current_fps = 0
         
-    def finger_up(self, landmarks, tip, pip):
-        return landmarks[tip].y < landmarks[pip].y
+    def calculate_distance(self, point1, point2):
+        """Calculate distance between two landmark points"""
+        return np.sqrt((point1.x - point2.x)**2 + (point1.y - point2.y)**2)
     
-    def count_fingers(self, landmarks):
-        fingers = [
-            self.finger_up(landmarks, 4, 3),   # thumb
-            self.finger_up(landmarks, 8, 6),   # index
-            self.finger_up(landmarks, 12, 10), # middle
-            self.finger_up(landmarks, 16, 14), # ring
-            self.finger_up(landmarks, 20, 18)  # pinky
-        ]
-        return sum(fingers)
+    def simple_finger_check(self, landmarks, tip_id, pip_id):
+        """Check if finger is extended"""
+        return landmarks[tip_id].y < landmarks[pip_id].y
+    
+    def count_extended_fingers(self, landmarks):
+        """Count how many fingers are extended"""
+        fingers = {
+            'thumb': self.simple_finger_check(landmarks, 4, 3),
+            'index': self.simple_finger_check(landmarks, 8, 6),
+            'middle': self.simple_finger_check(landmarks, 12, 10),
+            'ring': self.simple_finger_check(landmarks, 16, 14),
+            'pinky': self.simple_finger_check(landmarks, 20, 18)
+        }
+        return sum(fingers.values()), fingers
     
     def detect_pinch(self, landmarks):
-        thumb = landmarks[4]
-        index = landmarks[8]
-        distance = ((thumb.x - index.x)**2 + (thumb.y - index.y)**2)**0.5
-        return distance < 0.05
-    
-    def detect_a_ok(self, landmarks):
-        # Simple A-OK: thumb and index close, others up
-        if not self.detect_pinch(landmarks):
-            return False
-        
-        middle_up = self.finger_up(landmarks, 12, 10)
-        ring_up = self.finger_up(landmarks, 16, 14)
-        pinky_up = self.finger_up(landmarks, 20, 18)
-        
-        return sum([middle_up, ring_up, pinky_up]) >= 2
-    
-    def get_cursor_pos(self, landmarks, hand_label):
-        # Get thumb tip (landmark 4) and index finger tip (landmark 8)
+        """Detect if thumb and index finger are pinched together"""
         thumb_tip = landmarks[4]
         index_tip = landmarks[8]
-        
-        # Calculate midpoint between thumb and index finger
-        mid_x = (thumb_tip.x + index_tip.x) / 2
-        mid_y = (thumb_tip.y + index_tip.y) / 2
-        
-        # For left hand, adjust coordinates since thumb/index positions are mirrored
-        if hand_label == "Left":
-            mid_x = 1 - mid_x
-        
-        # Map to frame size (640x480)
-        x = int(mid_x * 640)
-        y = int(mid_y * 480)
-        
-        return max(0, min(x, 639)), max(0, min(y, 479))
+        distance = self.calculate_distance(thumb_tip, index_tip)
+        return distance < 0.05
     
-    def check_mode_toggle(self, all_hands):
-        if len(all_hands) != 2:
-            return
+    def detect_gesture(self, landmarks):
+        """Detect finger count gestures"""
+        finger_count, fingers = self.count_extended_fingers(landmarks)
         
-        left_hand = None
-        right_hand = None
+        # Check for pinch first
+        if self.detect_pinch(landmarks):
+            return "Pinch"
         
-        for landmarks, label in all_hands:
-            if label == "Left":
-                left_hand = landmarks
-            else:
-                right_hand = landmarks
+        # Count-based gestures
+        if finger_count == 0:
+            return "Fist"
+        elif finger_count == 1:
+            return "One Finger"
+        elif finger_count == 2:
+            return "Two Fingers"
+        elif finger_count == 3:
+            return "Three Fingers"
+        elif finger_count == 4:
+            return "Four Fingers"
+        elif finger_count == 5:
+            return "Open Hand"
         
-        if not left_hand or not right_hand:
-            return
+        return f"{finger_count} Fingers"
+    
+    def get_cursor_position(self, landmarks):
+        """Get cursor position from hand center"""
+        # Use palm center (landmark 9) for cursor position
+        palm_center = landmarks[9]
         
-        # Check: both hands A-OK
-        left_a_ok = self.detect_a_ok(left_hand)
-        right_a_ok = self.detect_a_ok(right_hand)
+        # Get frame dimensions
+        h, w = 720, 1280  # Assume standard frame size
         
-        if left_a_ok and right_a_ok:
-            now = time.time()
-            if now - self.last_mode_toggle > 2.0:  # 2 second cooldown
-                self.pinch_mode = not self.pinch_mode
-                self.last_mode_toggle = now
-                mode = "PINCH" if self.pinch_mode else "GESTURE"
-                print(f"Switched to {mode} MODE")
+        # Convert to frame coordinates (no flip - natural movement)
+        frame_x = int(palm_center.x * w)
+        frame_y = int(palm_center.y * h)
+        
+        # Apply smoothing
+        smooth_x = int(self.smoothing_factor * self.last_cursor_x + (1 - self.smoothing_factor) * frame_x)
+        smooth_y = int(self.smoothing_factor * self.last_cursor_y + (1 - self.smoothing_factor) * frame_y)
+        
+        # Keep in bounds
+        smooth_x = max(0, min(smooth_x, w - 1))
+        smooth_y = max(0, min(smooth_y, h - 1))
+        
+        self.last_cursor_x = smooth_x
+        self.last_cursor_y = smooth_y
+        
+        return smooth_x, smooth_y
     
-    def open_google_news(self):
-        try:
-            import subprocess
-            subprocess.run(['open', '-a', 'Google Chrome', 'https://news.google.com'], check=True)
-            print("Opened Google News in Chrome")
-        except:
-            try:
-                script = '''tell application "Google Chrome"
-                    activate
-                    open location "https://news.google.com"
-                end tell'''
-                subprocess.run(['osascript', '-e', script], check=True)
-                print("Opened Google News via AppleScript")
-            except:
-                print("Failed to open Google News")
+    def draw_cursor(self, frame):
+        """Draw cursor at current position"""
+        cursor_color = (0, 0, 255) if self.is_pinching else (0, 255, 0)
+        cursor_radius = 20 if self.is_pinching else 15
+        
+        # Main cursor circle
+        cv2.circle(frame, (self.cursor_x, self.cursor_y), cursor_radius, cursor_color, -1)
+        cv2.circle(frame, (self.cursor_x, self.cursor_y), cursor_radius + 3, cursor_color, 3)
+        
+        # Crosshair
+        line_length = 25
+        cv2.line(frame, 
+                (self.cursor_x - line_length, self.cursor_y), 
+                (self.cursor_x + line_length, self.cursor_y), 
+                cursor_color, 3)
+        cv2.line(frame, 
+                (self.cursor_x, self.cursor_y - line_length), 
+                (self.cursor_x, self.cursor_y + line_length), 
+                cursor_color, 3)
     
-    def open_spotify(self):
-        try:
-            import subprocess
-            subprocess.run(['open', '-a', 'Spotify'], check=True)
-            print("Opened Spotify app")
-        except:
-            try:
-                subprocess.run(['open', '-a', 'Google Chrome', 'https://open.spotify.com'], check=True)
-                print("Opened Spotify web in Chrome")
-            except:
-                print("Failed to open Spotify")
-    
-    def open_browser(self):
-        try:
-            import subprocess
-            subprocess.run(['open', '-a', 'Google Chrome'], check=True)
-            print("Opened Chrome")
-        except:
-            print("Failed to open Chrome")
-    
-    def close_tab(self):
-        try:
-            import subprocess
-            subprocess.run(['osascript', '-e', 'tell application "Google Chrome" to close active tab of front window'], check=True)
-            print("Closed tab")
-        except:
-            pyautogui.hotkey('cmd', 'w')
-            print("Sent Cmd+W")
-    
-    def take_screenshot(self):
-        try:
-            pyautogui.hotkey('cmd', 'shift', '3')
-            print("Screenshot taken")
-        except:
-            print("Screenshot failed")
-    
-    def trigger_mission_control(self):
-        try:
-            pyautogui.hotkey('ctrl', 'up')
-            print("Mission Control")
-        except:
-            print("Mission Control failed")
-    
-    def detect_gestures(self, landmarks):
-        fingers = [
-            self.finger_up(landmarks, 4, 3),   # thumb
-            self.finger_up(landmarks, 8, 6),   # index
-            self.finger_up(landmarks, 12, 10), # middle
-            self.finger_up(landmarks, 16, 14), # ring
-            self.finger_up(landmarks, 20, 18)  # pinky
+    def draw_info(self, frame):
+        """Draw information overlay"""
+        h, w = frame.shape[:2]
+        
+        # FPS
+        cv2.putText(frame, f"FPS: {self.current_fps}", (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # Cursor position
+        cv2.putText(frame, f"Cursor: ({self.cursor_x}, {self.cursor_y})", (10, 60), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # Pinch state
+        if self.is_pinching:
+            cv2.putText(frame, "PINCHING!", (10, 90), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        
+        # Instructions
+        instructions = [
+            "Cursor follows hand movement",
+            "Pinch thumb+index to activate",
+            "Press 'q' to quit"
         ]
-        finger_count = sum(fingers)
         
-        gestures = []
-        
-        # A-OK gesture
-        if self.detect_a_ok(landmarks):
-            gestures.append('A-OK')
-        
-        # Pinky up: only pinky (and optionally thumb)
-        elif fingers[4] and not fingers[1] and not fingers[2] and not fingers[3]:
-            if finger_count == 1 or (finger_count == 2 and fingers[0]):
-                gestures.append('Pinky Up')
-        
-        # Hang Loose: thumb + pinky only
-        elif fingers[0] and fingers[4] and not fingers[1] and not fingers[2] and not fingers[3]:
-            if finger_count == 2:
-                gestures.append('Hang Loose')
-        
-        # Upside down peace: ring + pinky
-        elif fingers[3] and fingers[4] and not fingers[1] and not fingers[2]:
-            gestures.append('Upside Down Peace')
-        
-        # Three fingers: index + middle + ring
-        elif fingers[1] and fingers[2] and fingers[3] and not fingers[4]:
-            gestures.append('Three Fingers')
-        
-        # Point: only index (and optionally thumb)
-        elif fingers[1] and not fingers[2] and not fingers[3] and not fingers[4]:
-            if finger_count == 1 or (finger_count == 2 and fingers[0]):
-                gestures.append('Point')
-        
-        # Peace: index + middle only
-        elif fingers[1] and fingers[2] and not fingers[0] and not fingers[3] and not fingers[4]:
-            if finger_count == 2:
-                gestures.append('Peace')
-        
-        # Open hand
-        elif finger_count >= 4:
-            gestures.append('Open Hand')
-        
-        # Fist
-        elif finger_count == 0:
-            gestures.append('Fist')
-        
-        return gestures
+        start_y = h - len(instructions) * 25 - 10
+        for i, instruction in enumerate(instructions):
+            cv2.putText(frame, instruction, (10, start_y + i * 25), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
     
-    def execute_gesture(self, gesture):
-        if gesture == "Point":
-            self.open_google_news()
-        elif gesture == "A-OK":
-            self.open_spotify()
-        elif gesture == "Three Fingers":
-            self.open_browser()
-        elif gesture == "Pinky Up":
-            self.close_tab()
-        elif gesture == "Hang Loose":
-            self.take_screenshot()
-        elif gesture == "Upside Down Peace":
-            self.trigger_mission_control()
+    def draw_hand_info(self, frame, hand_data):
+        """Draw minimal hand information"""
+        for i, (landmarks, hand_label) in enumerate(hand_data):
+            # Get hand center for label placement
+            hand_center_x = int(landmarks[9].x * frame.shape[1])
+            hand_center_y = int(landmarks[9].y * frame.shape[0]) - 40
+            
+            # Only show pinch status
+            is_pinching = self.detect_pinch(landmarks)
+            
+            # Choose color based on hand
+            color = (255, 100, 100) if hand_label == "Right" else (100, 255, 255)
+            
+            # Only draw pinch status
+            if is_pinching:
+                label_text = f"{hand_label}: PINCH"
+                cv2.putText(frame, label_text, (hand_center_x - 80, hand_center_y), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
     
     def run(self):
+        """Main loop"""
         cap = cv2.VideoCapture(0)
         
         if not cap.isOpened():
-            print("Camera error")
+            print("Error: Could not open camera")
             return
         
-        print("Simple Gesture Detector")
-        print("Gesture Mode:")
-        print("  Point (index finger) = Google News")
-        print("  A-OK (thumb+index circle) = Spotify")
-        print("  Three Fingers = Chrome Browser")
-        print("  Pinky Up = Close Tab")
-        print("  Hang Loose (thumb+pinky) = Screenshot")
-        print("  Upside Down Peace (ring+pinky) = Mission Control")
-        print("")
-        print("Mode Toggle: Both hands A-OK = Switch to Pinch Mode")
-        print("Press q to quit")
+        print("🎯 Simple Hand Tracker Started!")
+        print("Cursor follows hand movement")
+        print("Pinch thumb + index to activate")
+        print("Press 'q' to quit")
+        
+        last_gesture_time = 0
+        gesture_cooldown = 1.0  # Longer cooldown to reduce processing
+        frame_skip = 0  # For frame skipping optimization
         
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
             
+            # Flip for mirror effect
             frame = cv2.flip(frame, 1)
+            
+            frame_skip += 1
+            
+            # Process with MediaPipe (simplified - removed problematic frame skipping)
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = self.hands.process(rgb_frame)
             
-            # FPS
-            self.fps_counter += 1
-            if time.time() - self.fps_start >= 1.0:
-                self.current_fps = self.fps_counter
-                self.fps_counter = 0
-                self.fps_start = time.time()
-            
-            all_hands = []
+            hand_data = []
             self.is_pinching = False
             
+            # Process each detected hand
             if results.multi_hand_landmarks and results.multi_handedness:
-                # Collect hand data
                 for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
-                    label = handedness.classification[0].label
-                    all_hands.append((hand_landmarks.landmark, label))
-                
-                # Check for mode toggle
-                self.check_mode_toggle(all_hands)
-                
-                # Process based on mode
-                if self.pinch_mode:
-                    # PINCH MODE
-                    for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
-                        label = handedness.classification[0].label
-                        
-                        # Update cursor with proper midpoint calculation
-                        self.cursor_x, self.cursor_y = self.get_cursor_pos(hand_landmarks.landmark, label)
-                        
-                        # Check pinch
-                        if self.detect_pinch(hand_landmarks.landmark):
-                            self.is_pinching = True
-                            print(f"PINCH at ({self.cursor_x}, {self.cursor_y})")
-                        
-                        # Draw simple landmarks
-                        self.mp_drawing.draw_landmarks(
-                            frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS,
-                            self.mp_drawing.DrawingSpec(color=(100, 100, 255), thickness=1),
-                            self.mp_drawing.DrawingSpec(color=(100, 100, 255), thickness=1)
-                        )
-                else:
-                    # GESTURE MODE
-                    for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
-                        # Detect all gestures
-                        gestures = self.detect_gestures(hand_landmarks.landmark)
-                        
-                        for gesture in gestures:
-                            print(f"Detected: {gesture}")
-                            self.execute_gesture(gesture)
-                            time.sleep(0.5)  # Simple cooldown
-                        
-                        # Draw full landmarks
-                        self.mp_drawing.draw_landmarks(
-                            frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS,
-                            self.mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=2),
-                            self.mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=2)
-                        )
+                    # Draw hand landmarks
+                    self.mp_drawing.draw_landmarks(
+                        frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS,
+                        self.mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=2, circle_radius=2),
+                        self.mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2)
+                    )
+                    
+                    hand_label = handedness.classification[0].label
+                    hand_data.append((hand_landmarks.landmark, hand_label))
+                    
+                    # Update cursor position based on hand movement
+                    self.cursor_x, self.cursor_y = self.get_cursor_position(hand_landmarks.landmark)
+                    
+                    # Check for pinch
+                    if self.detect_pinch(hand_landmarks.landmark):
+                        self.is_pinching = True
+                        if not hasattr(self, 'last_pinch_print') or time.time() - self.last_pinch_print > 1.0:
+                            print(f"🤏 PINCH detected at ({self.cursor_x}, {self.cursor_y})")
+                            self.last_pinch_print = time.time()
             
-            # Draw UI
-            mode_text = "PINCH MODE" if self.pinch_mode else "GESTURE MODE"
-            mode_color = (0, 0, 255) if self.pinch_mode else (0, 255, 0)
+            # Print gesture information (throttled)
+            current_time = time.time()
+            if hand_data and current_time - last_gesture_time > gesture_cooldown:
+                self.draw_hand_info(frame, hand_data)
+                last_gesture_time = current_time
             
-            cv2.putText(frame, mode_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, mode_color, 2)
-            cv2.putText(frame, f"FPS: {self.current_fps}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            # Draw cursor and info
+            self.draw_cursor(frame)
+            self.draw_info(frame)
             
-            if self.pinch_mode:
-                # Draw cursor
-                color = (0, 0, 255) if self.is_pinching else (0, 255, 0)
-                cv2.circle(frame, (self.cursor_x, self.cursor_y), 15, color, -1)
-                cv2.putText(frame, f"({self.cursor_x}, {self.cursor_y})", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            # Calculate FPS
+            self.fps_counter += 1
+            if time.time() - self.fps_start_time >= 1.0:
+                self.current_fps = self.fps_counter
+                self.fps_counter = 0
+                self.fps_start_time = time.time()
             
-            cv2.imshow('Gesture Detector', frame)
+            # Show frame
+            cv2.imshow('Simple Hand Tracker', frame)
             
+            # Check for quit
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
         
@@ -343,5 +259,5 @@ class SimpleGestureDetector:
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    detector = SimpleGestureDetector()
-    detector.run()
+    tracker = SimpleHandTracker()
+    tracker.run()
