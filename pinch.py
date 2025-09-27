@@ -3,28 +3,34 @@ import mediapipe as mp
 import numpy as np
 import time
 
-class SimpleHandTracker:
+class HandTrackingController:
     def __init__(self):
         # Initialize MediaPipe hands
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
-            max_num_hands=2,
-            min_detection_confidence=0.5,  # Lower threshold for faster detection
-            min_tracking_confidence=0.3,   # Lower threshold for faster tracking
+            max_num_hands=1,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.3,
             model_complexity=0
         )
         self.mp_drawing = mp.solutions.drawing_utils
         
+        # Get screen dimensions (for display purposes)
+        self.screen_width = 1920  # Default screen width
+        self.screen_height = 1080  # Default screen height
+        print(f"Screen resolution: {self.screen_width}x{self.screen_height}")
+        
         # Cursor settings
-        self.cursor_x = 640
-        self.cursor_y = 360
+        self.cursor_x = self.screen_width // 2
+        self.cursor_y = self.screen_height // 2
         self.smoothing_factor = 0.7
         self.last_cursor_x = self.cursor_x
         self.last_cursor_y = self.cursor_y
         
         # Gesture states
         self.is_pinching = False
+        self.last_pinch_state = False
         
         # FPS tracking
         self.fps_counter = 0
@@ -39,17 +45,6 @@ class SimpleHandTracker:
         """Check if finger is extended"""
         return landmarks[tip_id].y < landmarks[pip_id].y
     
-    def count_extended_fingers(self, landmarks):
-        """Count how many fingers are extended"""
-        fingers = {
-            'thumb': self.simple_finger_check(landmarks, 4, 3),
-            'index': self.simple_finger_check(landmarks, 8, 6),
-            'middle': self.simple_finger_check(landmarks, 12, 10),
-            'ring': self.simple_finger_check(landmarks, 16, 14),
-            'pinky': self.simple_finger_check(landmarks, 20, 18)
-        }
-        return sum(fingers.values()), fingers
-    
     def detect_pinch(self, landmarks):
         """Detect if thumb and index finger are pinched together"""
         thumb_tip = landmarks[4]
@@ -57,73 +52,74 @@ class SimpleHandTracker:
         distance = self.calculate_distance(thumb_tip, index_tip)
         return distance < 0.05
     
-    def detect_gesture(self, landmarks):
-        """Detect finger count gestures"""
-        finger_count, fingers = self.count_extended_fingers(landmarks)
+    def get_cursor_position(self, landmarks, hand_label):
+        """Get cursor position from midpoint between thumb and index finger"""
+        # Only process right hand
+        if hand_label != "Right":
+            return self.last_cursor_x, self.last_cursor_y
+            
+        # Get thumb tip (landmark 4) and index finger tip (landmark 8)
+        thumb_tip = landmarks[4]
+        index_tip = landmarks[8]
         
-        # Check for pinch first
-        if self.detect_pinch(landmarks):
-            return "Pinch"
+        # Calculate midpoint between thumb and index finger
+        mid_x = (thumb_tip.x + index_tip.x) / 2
+        mid_y = (thumb_tip.y + index_tip.y) / 2
         
-        # Count-based gestures
-        if finger_count == 0:
-            return "Fist"
-        elif finger_count == 1:
-            return "One Finger"
-        elif finger_count == 2:
-            return "Two Fingers"
-        elif finger_count == 3:
-            return "Three Fingers"
-        elif finger_count == 4:
-            return "Four Fingers"
-        elif finger_count == 5:
-            return "Open Hand"
+        # Map to screen coordinates
+        screen_x = int(mid_x * self.screen_width)
+        screen_y = int(mid_y * self.screen_height)
         
-        return f"{finger_count} Fingers"
-    
-    def get_cursor_position(self, landmarks):
-        """Get cursor position from hand center"""
-        # Use palm center (landmark 9) for cursor position
-        palm_center = landmarks[9]
-        
-        # Get frame dimensions
-        h, w = 720, 1280  # Assume standard frame size
-        
-        # Convert to frame coordinates (no flip - natural movement)
-        frame_x = int(palm_center.x * w)
-        frame_y = int(palm_center.y * h)
+        # Add 20px offset to the right for right hand
+        screen_x += 20
         
         # Apply smoothing
-        smooth_x = int(self.smoothing_factor * self.last_cursor_x + (1 - self.smoothing_factor) * frame_x)
-        smooth_y = int(self.smoothing_factor * self.last_cursor_y + (1 - self.smoothing_factor) * frame_y)
+        smooth_x = int(self.smoothing_factor * self.last_cursor_x + (1 - self.smoothing_factor) * screen_x)
+        smooth_y = int(self.smoothing_factor * self.last_cursor_y + (1 - self.smoothing_factor) * screen_y)
         
         # Keep in bounds
-        smooth_x = max(0, min(smooth_x, w - 1))
-        smooth_y = max(0, min(smooth_y, h - 1))
+        smooth_x = max(0, min(smooth_x, self.screen_width - 1))
+        smooth_y = max(0, min(smooth_y, self.screen_height - 1))
         
         self.last_cursor_x = smooth_x
         self.last_cursor_y = smooth_y
         
         return smooth_x, smooth_y
     
-    def draw_cursor(self, frame):
-        """Draw cursor at current position"""
+    def handle_click(self, is_pinching):
+        """Handle click state changes (visual feedback only)"""
+        if is_pinching and not self.last_pinch_state:
+            # Pinch started
+            print(f"CLICK DOWN at ({self.cursor_x}, {self.cursor_y})")
+        elif not is_pinching and self.last_pinch_state:
+            # Pinch ended
+            print(f"CLICK UP at ({self.cursor_x}, {self.cursor_y})")
+        
+        self.last_pinch_state = is_pinching
+    
+    def draw_cursor_overlay(self, frame):
+        """Draw visual cursor overlay on the frame"""
+        # Map screen coordinates back to frame coordinates for display
+        frame_h, frame_w = frame.shape[:2]
+        frame_x = int((self.cursor_x / self.screen_width) * frame_w)
+        frame_y = int((self.cursor_y / self.screen_height) * frame_h)
+        
         cursor_color = (0, 0, 255) if self.is_pinching else (0, 255, 0)
         cursor_radius = 20 if self.is_pinching else 15
         
         # Main cursor circle
-        cv2.circle(frame, (self.cursor_x, self.cursor_y), cursor_radius, cursor_color, -1)
-        cv2.circle(frame, (self.cursor_x, self.cursor_y), cursor_radius + 3, cursor_color, 3)
+        cv2.circle(frame, (frame_x, frame_y), cursor_radius, cursor_color, -1)
+        cv2.circle(frame, (frame_x, frame_y), cursor_radius + 3, cursor_color, 3)
         
         # Crosshair
         line_length = 25
         cv2.line(frame, 
-                (self.cursor_x - line_length, self.cursor_y), 
-                (self.cursor_x + line_length, self.cursor_y), 
+                (frame_x - line_length, frame_y), 
+                (frame_x + line_length, frame_y), 
                 cursor_color, 3)
         cv2.line(frame, 
-                (self.cursor_x, self.cursor_y - line_length), 
-                (self.cursor_x, self.cursor_y + line_length), 
+                (frame_x, frame_y - line_length), 
+                (frame_x, frame_y + line_length), 
                 cursor_color, 3)
     
     def draw_info(self, frame):
@@ -134,8 +130,8 @@ class SimpleHandTracker:
         cv2.putText(frame, f"FPS: {self.current_fps}", (10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
-        # Cursor position
-        cv2.putText(frame, f"Cursor: ({self.cursor_x}, {self.cursor_y})", (10, 60), 
+        # Screen cursor position
+        cv2.putText(frame, f"Position: ({self.cursor_x}, {self.cursor_y})", (10, 60), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
         # Pinch state
@@ -145,8 +141,8 @@ class SimpleHandTracker:
         
         # Instructions
         instructions = [
-            "Cursor follows hand movement",
-            "Pinch thumb+index to activate",
+            "Right hand tracking demonstration",
+            "Pinch thumb+index for click feedback",
             "Press 'q' to quit"
         ]
         
@@ -156,23 +152,29 @@ class SimpleHandTracker:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
     
     def draw_hand_info(self, frame, hand_data):
-        """Draw minimal hand information"""
-        for i, (landmarks, hand_label) in enumerate(hand_data):
+        """Draw hand information"""
+        for landmarks, hand_label in hand_data:
+            # Only process right hand
+            if hand_label != "Right":
+                continue
+                
             # Get hand center for label placement
             hand_center_x = int(landmarks[9].x * frame.shape[1])
             hand_center_y = int(landmarks[9].y * frame.shape[0]) - 40
             
-            # Only show pinch status
+            # Check pinch status for this hand
             is_pinching = self.detect_pinch(landmarks)
             
-            # Choose color based on hand
-            color = (255, 100, 100) if hand_label == "Right" else (100, 255, 255)
+            # Color for right hand
+            color = (255, 100, 100)
             
-            # Only draw pinch status
+            # Draw hand label
+            label_text = f"{hand_label}"
             if is_pinching:
-                label_text = f"{hand_label}: PINCH"
-                cv2.putText(frame, label_text, (hand_center_x - 80, hand_center_y), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                label_text += ": PINCH"
+            
+            cv2.putText(frame, label_text, (hand_center_x - 80, hand_center_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
     
     def run(self):
         """Main loop"""
@@ -182,14 +184,10 @@ class SimpleHandTracker:
             print("Error: Could not open camera")
             return
         
-        print("🎯 Simple Hand Tracker Started!")
-        print("Cursor follows hand movement")
-        print("Pinch thumb + index to activate")
+        print("Right Hand Tracking Controller Started!")
+        print("Move your right hand to see cursor tracking")
+        print("Pinch thumb + index for click feedback")
         print("Press 'q' to quit")
-        
-        last_gesture_time = 0
-        gesture_cooldown = 1.0  # Longer cooldown to reduce processing
-        frame_skip = 0  # For frame skipping optimization
         
         while True:
             ret, frame = cap.read()
@@ -199,9 +197,7 @@ class SimpleHandTracker:
             # Flip for mirror effect
             frame = cv2.flip(frame, 1)
             
-            frame_skip += 1
-            
-            # Process with MediaPipe (simplified - removed problematic frame skipping)
+            # Process with MediaPipe
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = self.hands.process(rgb_frame)
             
@@ -211,6 +207,12 @@ class SimpleHandTracker:
             # Process each detected hand
             if results.multi_hand_landmarks and results.multi_handedness:
                 for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
+                    hand_label = handedness.classification[0].label
+                    
+                    # Only process right hand
+                    if hand_label != "Right":
+                        continue
+                    
                     # Draw hand landmarks
                     self.mp_drawing.draw_landmarks(
                         frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS,
@@ -218,27 +220,29 @@ class SimpleHandTracker:
                         self.mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2)
                     )
                     
-                    hand_label = handedness.classification[0].label
                     hand_data.append((hand_landmarks.landmark, hand_label))
                     
                     # Update cursor position based on hand movement
-                    self.cursor_x, self.cursor_y = self.get_cursor_position(hand_landmarks.landmark)
+                    self.cursor_x, self.cursor_y = self.get_cursor_position(hand_landmarks.landmark, hand_label)
                     
                     # Check for pinch
                     if self.detect_pinch(hand_landmarks.landmark):
                         self.is_pinching = True
-                        if not hasattr(self, 'last_pinch_print') or time.time() - self.last_pinch_print > 1.0:
-                            print(f"🤏 PINCH detected at ({self.cursor_x}, {self.cursor_y})")
-                            self.last_pinch_print = time.time()
+                
+                # Handle clicking based on overall pinch state
+                self.handle_click(self.is_pinching)
+            else:
+                # No hands detected - release any held click
+                if self.last_pinch_state:
+                    print("Released click - no hands detected")
+                    self.last_pinch_state = False
             
-            # Print gesture information (throttled)
-            current_time = time.time()
-            if hand_data and current_time - last_gesture_time > gesture_cooldown:
+            # Draw hand info
+            if hand_data:
                 self.draw_hand_info(frame, hand_data)
-                last_gesture_time = current_time
             
-            # Draw cursor and info
-            self.draw_cursor(frame)
+            # Draw cursor overlay and info
+            self.draw_cursor_overlay(frame)
             self.draw_info(frame)
             
             # Calculate FPS
@@ -249,7 +253,7 @@ class SimpleHandTracker:
                 self.fps_start_time = time.time()
             
             # Show frame
-            cv2.imshow('Simple Hand Tracker', frame)
+            cv2.imshow('Hand Tracking Controller', frame)
             
             # Check for quit
             if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -259,5 +263,5 @@ class SimpleHandTracker:
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    tracker = SimpleHandTracker()
-    tracker.run()
+    controller = HandTrackingController()
+    controller.run()
