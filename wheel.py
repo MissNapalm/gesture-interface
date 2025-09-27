@@ -29,12 +29,17 @@ class HandTracker:
         self.knob_active = False
         self.knob_center = None
         self.knob_radius = 120
-        self.knob_angle = 0
+        self.knob_angle = math.pi  # Start at 180 degrees (middle position)
         self.last_finger_angle = None
         
         # Stability system
         self.gesture_stability_count = 0
         self.required_stability = 3
+        
+        # Timeline properties
+        self.timeline_position = 0.5  # Position along timeline (0.0 to 1.0)
+        self.timeline_height = 60
+        self.timeline_margin = 20
     
     def is_finger_extended(self, landmarks, tip_id, pip_id):
         """Check if a finger is extended by comparing tip and PIP joint positions"""
@@ -91,6 +96,10 @@ class HandTracker:
             
             self.knob_angle += angle_diff * 2
             self.knob_angle = self.knob_angle % (2 * math.pi)
+            
+            # Update timeline position based on knob angle
+            # Map angle (0 to 2π) to timeline position (0.0 to 1.0)
+            self.timeline_position = (self.knob_angle / (2 * math.pi)) % 1.0
         
         self.last_finger_angle = current_angle
     
@@ -130,10 +139,69 @@ class HandTracker:
         cv2.circle(frame, (pointer_x, pointer_y), 10, (0, 0, 255), -1)
         cv2.circle(frame, (center_x, center_y), 8, (0, 255, 0), -1)
         
-        # Display angle
+        # Display angle and timeline position
         angle_degrees = int(math.degrees(self.knob_angle) % 360)
-        cv2.putText(frame, f"Angle: {angle_degrees}°", (center_x - 50, center_y + self.knob_radius + 40), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        timeline_percent = int(self.timeline_position * 100)
+        cv2.putText(frame, f"Angle: {angle_degrees}° | Timeline: {timeline_percent}%", 
+                   (center_x - 80, center_y + self.knob_radius + 40), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    
+    def draw_timeline(self, frame):
+        """Draw the timeline at the bottom of the frame"""
+        frame_h, frame_w = frame.shape[:2]
+        
+        # Timeline dimensions
+        timeline_y = frame_h - self.timeline_height - 10
+        timeline_start_x = self.timeline_margin
+        timeline_end_x = frame_w - self.timeline_margin
+        timeline_width = timeline_end_x - timeline_start_x
+        
+        # Draw timeline background
+        cv2.rectangle(frame, 
+                     (timeline_start_x, timeline_y), 
+                     (timeline_end_x, timeline_y + 30), 
+                     (60, 60, 60), -1)
+        
+        # Draw timeline border
+        cv2.rectangle(frame, 
+                     (timeline_start_x, timeline_y), 
+                     (timeline_end_x, timeline_y + 30), 
+                     (150, 150, 150), 2)
+        
+        # Draw timeline tick marks
+        num_ticks = 10
+        for i in range(num_ticks + 1):
+            tick_x = timeline_start_x + int(i * timeline_width / num_ticks)
+            tick_height = 15 if i % 5 == 0 else 8  # Larger ticks every 5 marks
+            cv2.line(frame, 
+                    (tick_x, timeline_y + 30), 
+                    (tick_x, timeline_y + 30 - tick_height), 
+                    (200, 200, 200), 1)
+            
+            # Add percentage labels at major ticks
+            if i % 5 == 0:
+                label = f"{int(i * 10)}%"
+                cv2.putText(frame, label, (tick_x - 10, timeline_y + 50), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        
+        # Calculate and draw timeline cursor position
+        cursor_x = timeline_start_x + int(self.timeline_position * timeline_width)
+        
+        # Draw timeline cursor (triangular pointer)
+        cursor_points = np.array([
+            [cursor_x, timeline_y - 5],
+            [cursor_x - 8, timeline_y - 15],
+            [cursor_x + 8, timeline_y - 15]
+        ], np.int32)
+        cv2.fillPoly(frame, [cursor_points], (0, 255, 255))
+        cv2.polylines(frame, [cursor_points], True, (0, 200, 200), 2)
+        
+        # Draw vertical line from cursor to timeline
+        cv2.line(frame, (cursor_x, timeline_y - 5), (cursor_x, timeline_y + 30), (0, 255, 255), 2)
+        
+        # Timeline title
+        cv2.putText(frame, "Timeline", (timeline_start_x, timeline_y - 20), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     
     def draw_info(self, frame):
         """Draw FPS and gesture information"""
@@ -144,9 +212,9 @@ class HandTracker:
             cv2.putText(frame, "KNOB ACTIVE!", (10, 70), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
         
-        cv2.putText(frame, "Extend thumb, index & middle fingers to create knob", (10, frame.shape[0] - 40), 
+        cv2.putText(frame, "Extend thumb, index & middle fingers to create knob", (10, frame.shape[0] - 90), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.putText(frame, "Move index finger to rotate knob - Press 'q' to quit", (10, frame.shape[0] - 20), 
+        cv2.putText(frame, "Move index finger to rotate knob and control timeline - Press 'q' to quit", (10, frame.shape[0] - 70), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     
     def run(self):
@@ -157,9 +225,9 @@ class HandTracker:
             print("Error: Could not open camera")
             return
         
-        print("Hand Tracker with Virtual Knob Started!")
+        print("Hand Tracker with Virtual Knob and Timeline Started!")
         print("Extend thumb, index, and middle fingers to create a virtual knob")
-        print("Move your index finger to rotate the knob")
+        print("Move your index finger to rotate the knob and control the timeline")
         print("Press 'q' to quit")
         
         while True:
@@ -195,7 +263,8 @@ class HandTracker:
                             self.update_knob_angle(finger_angle)
                             
                             if self.fps_counter % 10 == 0:
-                                print(f"Knob active - Angle: {int(math.degrees(self.knob_angle) % 360)}°")
+                                timeline_percent = int(self.timeline_position * 100)
+                                print(f"Knob: {int(math.degrees(self.knob_angle) % 360)}° | Timeline: {timeline_percent}%")
                     else:
                         self.gesture_stability_count = max(self.gesture_stability_count - 1, 0)
                         
@@ -212,6 +281,7 @@ class HandTracker:
                     print("Knob deactivated - no hands")
             
             self.draw_knob(frame)
+            self.draw_timeline(frame)
             self.draw_info(frame)
             
             self.fps_counter += 1
