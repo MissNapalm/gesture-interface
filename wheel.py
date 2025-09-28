@@ -10,7 +10,7 @@ class HandTracker:
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
-            max_num_hands=1,
+            max_num_hands=2,  # Changed to detect both hands
             min_detection_confidence=0.5,
             min_tracking_confidence=0.3,
             model_complexity=0
@@ -40,6 +40,11 @@ class HandTracker:
         self.timeline_position = 0.5  # Position along timeline (0.0 to 1.0)
         self.timeline_height = 60
         self.timeline_margin = 20
+        
+        # Wheel mode properties
+        self.wheel_mode = False
+        self.touch_threshold = 50  # Distance threshold for touch detection in pixels
+        self.wheel_persistent = False  # Once wheel appears, it stays until hands drop
     
     def is_finger_extended(self, landmarks, tip_id, pip_id):
         """Check if a finger is extended by comparing tip and PIP joint positions"""
@@ -102,6 +107,69 @@ class HandTracker:
             self.timeline_position = (self.knob_angle / (2 * math.pi)) % 1.0
         
         self.last_finger_angle = current_angle
+    
+    def draw_hand_numbers(self, frame, landmarks, hand_label):
+        """Draw numbers on fingertips and knuckles"""
+        frame_h, frame_w = frame.shape[:2]
+        
+        if hand_label == "Right":
+            # Draw 1 and 2 on index and middle fingertips
+            index_tip = landmarks[8]
+            middle_tip = landmarks[12]
+            
+            # Index finger tip - "1"
+            tip_x = int(index_tip.x * frame_w)
+            tip_y = int(index_tip.y * frame_h)
+            cv2.putText(frame, "1", (tip_x - 10, tip_y - 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 3)
+            cv2.putText(frame, "1", (tip_x - 10, tip_y - 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+            
+            # Middle finger tip - "2"
+            tip_x = int(middle_tip.x * frame_w)
+            tip_y = int(middle_tip.y * frame_h)
+            cv2.putText(frame, "2", (tip_x - 10, tip_y - 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 3)
+            cv2.putText(frame, "2", (tip_x - 10, tip_y - 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+        
+        elif hand_label == "Left":
+            # Draw 1, 2, 3, 4 on knuckles (MCP joints)
+            knuckle_landmarks = [5, 9, 13, 17]  # Index, Middle, Ring, Pinky MCP joints
+            knuckle_labels = ["1", "2", "3", "4"]
+            
+            for i, knuckle_id in enumerate(knuckle_landmarks):
+                knuckle = landmarks[knuckle_id]
+                knuckle_x = int(knuckle.x * frame_w)
+                knuckle_y = int(knuckle.y * frame_h)
+                
+                cv2.putText(frame, knuckle_labels[i], (knuckle_x - 10, knuckle_y + 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 3)
+                cv2.putText(frame, knuckle_labels[i], (knuckle_x - 10, knuckle_y + 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2)
+    
+    def detect_touch(self, right_landmarks, left_landmarks):
+        """Detect if right hand fingertips (1 or 2) are touching left hand knuckles"""
+        frame_h, frame_w = 640, 480  # Approximate frame dimensions for calculation
+        
+        # Right hand fingertips (index=8, middle=12)
+        right_index_tip = (int(right_landmarks[8].x * frame_w), int(right_landmarks[8].y * frame_h))
+        right_middle_tip = (int(right_landmarks[12].x * frame_w), int(right_landmarks[12].y * frame_h))
+        
+        # Left hand knuckles (MCP joints: 5, 9, 13, 17)
+        left_knuckles = []
+        for knuckle_id in [5, 9, 13, 17]:
+            knuckle_pos = (int(left_landmarks[knuckle_id].x * frame_w), int(left_landmarks[knuckle_id].y * frame_h))
+            left_knuckles.append(knuckle_pos)
+        
+        # Check if any fingertip is close to any knuckle
+        for fingertip in [right_index_tip, right_middle_tip]:
+            for knuckle in left_knuckles:
+                distance = math.sqrt((fingertip[0] - knuckle[0])**2 + (fingertip[1] - knuckle[1])**2)
+                if distance < self.touch_threshold:
+                    return True
+        
+        return False
     
     def draw_knob(self, frame):
         """Draw the virtual knob/wheel"""
@@ -208,14 +276,23 @@ class HandTracker:
         cv2.putText(frame, f"FPS: {self.current_fps}", (10, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
-        if self.three_finger_gesture:
-            cv2.putText(frame, "KNOB ACTIVE!", (10, 70), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-        
-        cv2.putText(frame, "Extend thumb, index & middle fingers to create knob", (10, frame.shape[0] - 90), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.putText(frame, "Move index finger to rotate knob and control timeline - Press 'q' to quit", (10, frame.shape[0] - 70), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        if self.wheel_mode:
+            cv2.putText(frame, "WHEEL MODE ACTIVE!", (10, 70), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+            
+            if self.three_finger_gesture:
+                cv2.putText(frame, "KNOB ACTIVE!", (10, 100), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+            
+            cv2.putText(frame, "Make 3-finger gesture to control knob", (10, frame.shape[0] - 90), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(frame, "Drop both hands to exit wheel mode - Press 'q' to quit", (10, frame.shape[0] - 70), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        else:
+            cv2.putText(frame, "Touch fingertips (1,2) to knuckles to activate wheel", (10, frame.shape[0] - 40), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            cv2.putText(frame, "Press 'q' to quit", (10, frame.shape[0] - 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     
     def run(self):
         """Main loop"""
@@ -241,15 +318,41 @@ class HandTracker:
             
             self.three_finger_gesture = False
             
-            if results.multi_hand_landmarks:
-                for hand_landmarks in results.multi_hand_landmarks:
-                    self.mp_drawing.draw_landmarks(
-                        frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS,
-                        self.mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=2, circle_radius=2),
-                        self.mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2)
-                    )
+            if results.multi_hand_landmarks and results.multi_handedness:
+                right_hand_landmarks = None
+                left_hand_landmarks = None
+                
+                # First pass: identify and draw all hands
+                for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
+                    hand_label = handedness.classification[0].label
                     
-                    gesture_detected = self.detect_three_finger_gesture(hand_landmarks.landmark)
+                    # Only draw skeleton for right hand, or for left hand if not in wheel mode
+                    if hand_label == "Right" or not self.wheel_mode:
+                        self.mp_drawing.draw_landmarks(
+                            frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS,
+                            self.mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=2, circle_radius=2),
+                            self.mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2)
+                        )
+                    
+                    # Draw hand numbers
+                    self.draw_hand_numbers(frame, hand_landmarks.landmark, hand_label)
+                    
+                    # Store hand landmarks for touch detection
+                    if hand_label == "Right":
+                        right_hand_landmarks = hand_landmarks.landmark
+                    elif hand_label == "Left":
+                        left_hand_landmarks = hand_landmarks.landmark
+                
+                # Check for touch to activate wheel mode
+                if not self.wheel_mode and right_hand_landmarks and left_hand_landmarks:
+                    if self.detect_touch(right_hand_landmarks, left_hand_landmarks):
+                        self.wheel_mode = True
+                        self.wheel_persistent = True
+                        print("Wheel mode activated!")
+                
+                # Always process three-finger gesture for right hand if in wheel mode
+                if self.wheel_mode and right_hand_landmarks:
+                    gesture_detected = self.detect_three_finger_gesture(right_hand_landmarks)
                     
                     if gesture_detected:
                         self.gesture_stability_count = min(self.gesture_stability_count + 1, self.required_stability)
@@ -257,9 +360,9 @@ class HandTracker:
                         if self.gesture_stability_count >= self.required_stability:
                             self.three_finger_gesture = True
                             self.knob_active = True
-                            self.knob_center = self.get_hand_center(hand_landmarks.landmark)
+                            self.knob_center = self.get_hand_center(right_hand_landmarks)
                             
-                            finger_angle = self.calculate_finger_angle(hand_landmarks.landmark)
+                            finger_angle = self.calculate_finger_angle(right_hand_landmarks)
                             self.update_knob_angle(finger_angle)
                             
                             if self.fps_counter % 10 == 0:
@@ -267,21 +370,23 @@ class HandTracker:
                                 print(f"Knob: {int(math.degrees(self.knob_angle) % 360)}° | Timeline: {timeline_percent}%")
                     else:
                         self.gesture_stability_count = max(self.gesture_stability_count - 1, 0)
-                        
-                        if self.gesture_stability_count <= 0:
-                            if self.knob_active:
-                                self.knob_active = False
-                                self.last_finger_angle = None
-                                print("Knob deactivated")
+                        # Don't deactivate knob - just set gesture to false
+                        self.three_finger_gesture = False
             else:
-                self.gesture_stability_count = max(self.gesture_stability_count - 1, 0)
-                if self.gesture_stability_count <= 0 and self.knob_active:
+                # No hands detected - deactivate wheel mode and reset everything
+                if self.wheel_mode:
+                    self.wheel_mode = False
+                    self.wheel_persistent = False
                     self.knob_active = False
+                    self.three_finger_gesture = False
+                    self.gesture_stability_count = 0
                     self.last_finger_angle = None
-                    print("Knob deactivated - no hands")
+                    print("Wheel mode deactivated - no hands detected")
             
-            self.draw_knob(frame)
-            self.draw_timeline(frame)
+            # Always draw knob and timeline if wheel mode was ever activated (persistent)
+            if self.wheel_persistent:
+                self.draw_knob(frame)
+                self.draw_timeline(frame)
             self.draw_info(frame)
             
             self.fps_counter += 1
