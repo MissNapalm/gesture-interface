@@ -45,6 +45,7 @@ class HandTracker:
         self.wheel_mode = False
         self.touch_threshold = 50  # Distance threshold for touch detection in pixels
         self.wheel_persistent = False  # Once wheel appears, it stays until hands drop
+        self.show_wheel = False  # Controls when to actually draw the wheel
     
     def is_finger_extended(self, landmarks, tip_id, pip_id):
         """Check if a finger is extended by comparing tip and PIP joint positions"""
@@ -171,6 +172,12 @@ class HandTracker:
         
         return False
     
+    def is_right_hand_on_right_side(self, landmarks, frame_width):
+        """Check if right hand is on the right side of the screen"""
+        hand_center = self.get_hand_center(landmarks)
+        hand_x = hand_center.x * frame_width
+        return hand_x > frame_width * 0.6  # Right hand must be on right 40% of screen
+    
     def draw_knob(self, frame):
         """Draw the virtual knob/wheel"""
         if not self.knob_active or self.knob_center is None:
@@ -280,12 +287,16 @@ class HandTracker:
             cv2.putText(frame, "WHEEL MODE ACTIVE!", (10, 70), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
             
-            if self.three_finger_gesture:
+            if not self.show_wheel:
+                cv2.putText(frame, "Move right hand to right side to show wheel", (10, 100), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            elif self.three_finger_gesture:
                 cv2.putText(frame, "KNOB ACTIVE!", (10, 100), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
             
-            cv2.putText(frame, "Make 3-finger gesture to control knob", (10, frame.shape[0] - 90), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            if self.show_wheel:
+                cv2.putText(frame, "Make 3-finger gesture to control knob", (10, frame.shape[0] - 90), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             cv2.putText(frame, "Drop both hands to exit wheel mode - Press 'q' to quit", (10, frame.shape[0] - 70), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         else:
@@ -326,12 +337,30 @@ class HandTracker:
                 for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
                     hand_label = handedness.classification[0].label
                     
-                    # Only draw skeleton for right hand, or for left hand if not in wheel mode
-                    if hand_label == "Right" or not self.wheel_mode:
+                    # Much more aggressive skeleton hiding to reduce jitter
+                    show_skeleton = False
+                    
+                    # Only show skeleton for right hand when NOT in wheel mode
+                    if hand_label == "Right" and not self.wheel_mode:
+                        show_skeleton = True
+                    # For left hand, only show skeleton if not in wheel mode AND fingers are clearly extended
+                    elif hand_label == "Left" and not self.wheel_mode:
+                        landmarks = hand_landmarks.landmark
+                        # Only show if at least 2 fingers are clearly extended
+                        extended_fingers = sum([
+                            self.is_finger_extended(landmarks, 8, 6),   # Index
+                            self.is_finger_extended(landmarks, 12, 10), # Middle  
+                            self.is_finger_extended(landmarks, 16, 14), # Ring
+                            self.is_finger_extended(landmarks, 20, 18)  # Pinky
+                        ])
+                        if extended_fingers >= 2:
+                            show_skeleton = True
+                    
+                    if show_skeleton:
                         self.mp_drawing.draw_landmarks(
                             frame, hand_landmarks, self.mp_hands.HAND_CONNECTIONS,
                             self.mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=2, circle_radius=2),
-                            self.mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2)
+                            self.mp_drawing.DrawingSpec(color=(255, 255, 255), thickness=2)
                         )
                     
                     # Draw hand numbers
@@ -352,39 +381,48 @@ class HandTracker:
                 
                 # Always process three-finger gesture for right hand if in wheel mode
                 if self.wheel_mode and right_hand_landmarks:
-                    gesture_detected = self.detect_three_finger_gesture(right_hand_landmarks)
+                    frame_h, frame_w = frame.shape[:2]
                     
-                    if gesture_detected:
-                        self.gesture_stability_count = min(self.gesture_stability_count + 1, self.required_stability)
+                    # Check if right hand is on right side of screen to show wheel
+                    if self.is_right_hand_on_right_side(right_hand_landmarks, frame_w):
+                        self.show_wheel = True
+                    
+                    # Only process gesture if wheel is showing
+                    if self.show_wheel:
+                        gesture_detected = self.detect_three_finger_gesture(right_hand_landmarks)
                         
-                        if self.gesture_stability_count >= self.required_stability:
-                            self.three_finger_gesture = True
-                            self.knob_active = True
-                            self.knob_center = self.get_hand_center(right_hand_landmarks)
+                        if gesture_detected:
+                            self.gesture_stability_count = min(self.gesture_stability_count + 1, self.required_stability)
                             
-                            finger_angle = self.calculate_finger_angle(right_hand_landmarks)
-                            self.update_knob_angle(finger_angle)
-                            
-                            if self.fps_counter % 10 == 0:
-                                timeline_percent = int(self.timeline_position * 100)
-                                print(f"Knob: {int(math.degrees(self.knob_angle) % 360)}° | Timeline: {timeline_percent}%")
-                    else:
-                        self.gesture_stability_count = max(self.gesture_stability_count - 1, 0)
-                        # Don't deactivate knob - just set gesture to false
-                        self.three_finger_gesture = False
+                            if self.gesture_stability_count >= self.required_stability:
+                                self.three_finger_gesture = True
+                                self.knob_active = True
+                                self.knob_center = self.get_hand_center(right_hand_landmarks)
+                                
+                                finger_angle = self.calculate_finger_angle(right_hand_landmarks)
+                                self.update_knob_angle(finger_angle)
+                                
+                                if self.fps_counter % 10 == 0:
+                                    timeline_percent = int(self.timeline_position * 100)
+                                    print(f"Knob: {int(math.degrees(self.knob_angle) % 360)}° | Timeline: {timeline_percent}%")
+                        else:
+                            self.gesture_stability_count = max(self.gesture_stability_count - 1, 0)
+                            # Don't deactivate knob - just set gesture to false
+                            self.three_finger_gesture = False
             else:
                 # No hands detected - deactivate wheel mode and reset everything
                 if self.wheel_mode:
                     self.wheel_mode = False
                     self.wheel_persistent = False
+                    self.show_wheel = False
                     self.knob_active = False
                     self.three_finger_gesture = False
                     self.gesture_stability_count = 0
                     self.last_finger_angle = None
                     print("Wheel mode deactivated - no hands detected")
             
-            # Always draw knob and timeline if wheel mode was ever activated (persistent)
-            if self.wheel_persistent:
+            # Only draw knob and timeline if wheel should be shown
+            if self.wheel_persistent and self.show_wheel:
                 self.draw_knob(frame)
                 self.draw_timeline(frame)
             self.draw_info(frame)
