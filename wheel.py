@@ -68,14 +68,10 @@ class HandTracker:
         self.blur_strength = 45   
         self.blue_overlay = False  # No blue overlay
         
-        # Test window properties
-        self.test_window_open = False
-        self.window_gesture_detected = False
-        self.window_gesture_stability_count = 0
-        
-        # Center box properties
-        self.box_size = 300  # Size of the square box
-        self.box_color = (0, 0, 0)  # Black color (BGR)
+        # Center circle properties
+        self.circle_radius = 200  # Radius of the circle
+        self.circle_color = (0, 0, 0)  # Black color (BGR)
+        self.blur_radius = 30  # Blur amount for the circle
     
     def load_audio_files(self):
         """Load audio files if they exist"""
@@ -112,21 +108,20 @@ class HandTracker:
         sound_thread.daemon = True
         sound_thread.start()
     
-    def draw_center_box(self, frame):
-        """Draw a simple black square box in the center of the screen"""
+    def draw_center_circle(self, frame):
+        """Draw a blurred black circle in the center of the screen"""
         frame_h, frame_w = frame.shape[:2]
         
-        # Calculate center position
-        center_x = frame_w // 2
-        center_y = frame_h // 2
+        # Create a mask for the circle
+        mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
+        center = (frame_w // 2, frame_h // 2)
+        cv2.circle(mask, center, self.circle_radius, 255, -1)
         
-        # Calculate box corners
-        half_size = self.box_size // 2
-        top_left = (center_x - half_size, center_y - half_size)
-        bottom_right = (center_x + half_size, center_y + half_size)
+        # Create blurred version of the frame
+        blurred_frame = cv2.GaussianBlur(frame, (self.blur_radius * 2 + 1, self.blur_radius * 2 + 1), 0)
         
-        # Draw filled black rectangle
-        cv2.rectangle(frame, top_left, bottom_right, self.box_color, -1)
+        # Apply the blurred circle to the original frame
+        frame[mask == 255] = blurred_frame[mask == 255]
     
     def is_finger_extended(self, landmarks, tip_id, pip_id):
         """Check if a finger is extended by comparing tip and PIP joint positions"""
@@ -190,29 +185,6 @@ class HandTracker:
         three_fingers_up = index_extended and middle_extended and ring_extended
         
         return three_fingers_up and thumb_down and pinky_down
-    
-    def create_test_window(self):
-        """Create a small test window"""
-        if not self.test_window_open:
-            # Create a small test window with some content
-            test_frame = np.full((200, 300, 3), (50, 50, 50), dtype=np.uint8)
-            cv2.putText(test_frame, "Test Window", (80, 50), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(test_frame, "Gesture Detected!", (60, 100), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            cv2.putText(test_frame, "Drop hands to close", (50, 150), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            
-            cv2.imshow('Test Window', test_frame)
-            self.test_window_open = True
-            print("Test window opened!")
-    
-    def close_test_window(self):
-        """Close the test window"""
-        if self.test_window_open:
-            cv2.destroyWindow('Test Window')
-            self.test_window_open = False
-            print("Test window closed!")
     
     def get_hand_center(self, landmarks):
         """Get the center point of the hand"""
@@ -346,7 +318,7 @@ class HandTracker:
         return hand_x > frame_width * 0.6  # Right hand must be on right 40% of screen
     
     def draw_knob(self, frame):
-        """Draw the virtual knob/wheel"""
+        """Draw the virtual knob/wheel with retro white/green/red colors"""
         if not self.knob_active or self.knob_center is None:
             return
         
@@ -359,34 +331,35 @@ class HandTracker:
         center_x = max(margin, min(center_x, frame_w - margin))
         center_y = max(margin, min(center_y, frame_h - margin))
         
-        # Draw outer circle
-        cv2.circle(frame, (center_x, center_y), self.knob_radius, (255, 255, 255), 3)
-        cv2.circle(frame, (center_x, center_y), self.knob_radius - 15, (255, 255, 255), 2)
+        # Draw outer circles - retro style with green outer, white inner
+        cv2.circle(frame, (center_x, center_y), self.knob_radius, (0, 255, 0), 3)  # Green outer ring
+        cv2.circle(frame, (center_x, center_y), self.knob_radius - 15, (255, 255, 255), 2)  # White inner ring
         
-        # Draw tick marks
+        # Draw tick marks in white
         for i in range(12):
             tick_angle = i * (2 * math.pi / 12)
             outer_x = center_x + int((self.knob_radius - 8) * math.cos(tick_angle))
             outer_y = center_y + int((self.knob_radius - 8) * math.sin(tick_angle))
             inner_x = center_x + int((self.knob_radius - 22) * math.cos(tick_angle))
             inner_y = center_y + int((self.knob_radius - 22) * math.sin(tick_angle))
-            cv2.line(frame, (outer_x, outer_y), (inner_x, inner_y), (255, 255, 255), 2)
+            
+            cv2.line(frame, (outer_x, outer_y), (inner_x, inner_y), (255, 255, 255), 2)  # White ticks
         
-        # Draw pointer
+        # Draw red pointer
         pointer_length = self.knob_radius - 30
         pointer_x = center_x + int(pointer_length * math.cos(self.knob_angle))
         pointer_y = center_y + int(pointer_length * math.sin(self.knob_angle))
         
-        cv2.line(frame, (center_x, center_y), (pointer_x, pointer_y), (255, 255, 255), 5)
-        cv2.circle(frame, (pointer_x, pointer_y), 10, (255, 255, 255), -1)
-        cv2.circle(frame, (center_x, center_y), 8, (255, 255, 255), -1)
+        cv2.line(frame, (center_x, center_y), (pointer_x, pointer_y), (0, 0, 255), 5)  # Red pointer
+        cv2.circle(frame, (pointer_x, pointer_y), 10, (0, 0, 255), -1)  # Red tip
+        cv2.circle(frame, (center_x, center_y), 8, (255, 255, 255), -1)  # White center
         
-        # Display angle and timeline position
+        # Display angle and timeline position in green
         angle_degrees = int(math.degrees(self.knob_angle) % 360)
         timeline_percent = int(self.timeline_position * 100)
         cv2.putText(frame, f"Angle: {angle_degrees}° | Timeline: {timeline_percent}%", 
                    (center_x - 80, center_y + self.knob_radius + 40), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     
     def draw_timeline(self, frame):
         """Draw the timeline at the bottom of the frame"""
@@ -467,14 +440,8 @@ class HandTracker:
             cv2.putText(frame, "Drop both hands to exit wheel mode", (10, frame.shape[0] - 90), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         else:
-            cv2.putText(frame, "Touch fingertips (1,2) to knuckles to activate wheel", (10, frame.shape[0] - 80), 
+            cv2.putText(frame, "Touch fingertips (1,2) to knuckles to activate wheel", (10, frame.shape[0] - 60), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            cv2.putText(frame, "OK gesture (right) + 3 fingers up (left) = test window", (10, frame.shape[0] - 60), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        if self.test_window_open:
-            cv2.putText(frame, "TEST WINDOW OPEN!", (10, 50), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         
         cv2.putText(frame, "Press 'q' to quit", (10, frame.shape[0] - 40), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
@@ -494,7 +461,6 @@ class HandTracker:
         
         print("Hand Tracker with Virtual Knob, Timeline, and Center Box Started!")
         print("Touch fingertips (1,2) to knuckles to activate wheel")
-        print("OK gesture (right hand) + 3 fingers up (left hand) to open test window")
         print("Extend thumb, index, and middle fingers to create a virtual knob")
         print("Move your index finger to rotate the knob and control the timeline")
         print("Press 'q' to quit")
@@ -508,11 +474,10 @@ class HandTracker:
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = self.hands.process(rgb_frame)
             
-            # Draw the center box AFTER hand processing but before other drawing
-            self.draw_center_box(frame)
+            # Draw the center circle AFTER hand processing but before other drawing
+            self.draw_center_circle(frame)
             
             self.three_finger_gesture = False
-            self.window_gesture_detected = False
             
             if results.multi_hand_landmarks and results.multi_handedness:
                 right_hand_landmarks = None
@@ -573,20 +538,6 @@ class HandTracker:
                     # Reset touch sound flag when not touching
                     self.touch_sound_played = False
                 
-                # Check for window opening gesture (OK on right hand + three fingers up on left)
-                if right_hand_landmarks and left_hand_landmarks:
-                    ok_gesture = self.detect_ok_gesture(right_hand_landmarks)
-                    three_up_gesture = self.detect_three_up_thumb_down(left_hand_landmarks)
-                    
-                    if ok_gesture and three_up_gesture:
-                        self.window_gesture_stability_count = min(self.window_gesture_stability_count + 1, self.required_stability)
-                        
-                        if self.window_gesture_stability_count >= self.required_stability:
-                            self.window_gesture_detected = True
-                            self.create_test_window()
-                    else:
-                        self.window_gesture_stability_count = max(self.window_gesture_stability_count - 1, 0)
-                
                 # Always process three-finger gesture for right hand if in wheel mode
                 if self.wheel_mode and right_hand_landmarks:
                     frame_h, frame_w = frame.shape[:2]
@@ -638,13 +589,6 @@ class HandTracker:
                     self.wheel_sound_played = False  # Reset for next time
                     self.touch_sound_played = False  # Reset touch sound
                     print("Wheel mode deactivated - no hands detected")
-                
-                # Close test window when hands are dropped
-                if self.test_window_open:
-                    self.close_test_window()
-                
-                # Reset window gesture tracking
-                self.window_gesture_stability_count = 0
             
             # Draw all HUD elements on the frame (AFTER the center box, so they appear on top)
             # Only draw knob and timeline if wheel should be shown
