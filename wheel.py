@@ -68,20 +68,19 @@ class HandTracker:
         self.blur_strength = 45   
         self.blue_overlay = False  # No blue overlay
         
-        # Center circle properties
-        self.circle_radius = 200  # Radius of the circle
-        self.circle_color = (0, 0, 0)  # Black color (BGR)
-        self.blur_radius = 30  # Blur amount for the circle
+        # Center vertical bar properties
+        self.bar_width = 0  # Width of the vertical bar
+        self.bar_color = (0, 0, 0)  # Black color (BGR)
     
     def load_audio_files(self):
         """Load audio files if they exist"""
         self.sounds = {}
         audio_files = {
             'startup': 'music.mp3',
-            'wheel': 'wheel.mp3',
+            'wheel': 'active.mp3',
             'powerdown': 'powerdown.mp3',
             'whoosh': 'whoosh.mp3',
-            'active': 'active.mp3'
+            'active': 'swipe.mp3'
         }
         
         for sound_name, filename in audio_files.items():
@@ -108,20 +107,7 @@ class HandTracker:
         sound_thread.daemon = True
         sound_thread.start()
     
-    def draw_center_circle(self, frame):
-        """Draw a blurred black circle in the center of the screen"""
-        frame_h, frame_w = frame.shape[:2]
-        
-        # Create a mask for the circle
-        mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
-        center = (frame_w // 2, frame_h // 2)
-        cv2.circle(mask, center, self.circle_radius, 255, -1)
-        
-        # Create blurred version of the frame
-        blurred_frame = cv2.GaussianBlur(frame, (self.blur_radius * 2 + 1, self.blur_radius * 2 + 1), 0)
-        
-        # Apply the blurred circle to the original frame
-        frame[mask == 255] = blurred_frame[mask == 255]
+    # draw_center_bar removed: no center bar will be drawn
     
     def is_finger_extended(self, landmarks, tip_id, pip_id):
         """Check if a finger is extended by comparing tip and PIP joint positions"""
@@ -474,8 +460,7 @@ class HandTracker:
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = self.hands.process(rgb_frame)
             
-            # Draw the center circle AFTER hand processing but before other drawing
-            self.draw_center_circle(frame)
+            # Center bar removed
             
             self.three_finger_gesture = False
             
